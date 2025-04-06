@@ -21,8 +21,9 @@ import logging
 from abc import ABC, abstractmethod
 from services.gcp_toolkit import upload_to_gcs
 from services.s3_toolkit import upload_to_s3
-from config import validate_env_vars
+from config import validate_env_vars, LOCAL_STORAGE_PATH
 from urllib.parse import urlparse
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,29 @@ class CloudStorageProvider(ABC):
     def upload_file(self, file_path: str) -> str:
         pass
 
+class LocalStorageProvider(CloudStorageProvider):
+    def __init__(self):
+        self.storage_path = os.getenv('LOCAL_STORAGE_PATH', LOCAL_STORAGE_PATH)
+        # Memastikan direktori storage ada
+        os.makedirs(self.storage_path, exist_ok=True)
+
+    def upload_file(self, file_path: str) -> str:
+        try:
+            # Mendapatkan nama file dari path
+            filename = os.path.basename(file_path)
+            # Path tujuan di local storage
+            destination = os.path.join(self.storage_path, filename)
+            
+            # Jika file sumber dan tujuan berbeda, salin file
+            if os.path.abspath(file_path) != os.path.abspath(destination):
+                shutil.copy2(file_path, destination)
+            
+            logger.info(f"File berhasil disimpan di local storage: {destination}")
+            return f"file://{destination}"
+        except Exception as e:
+            logger.error(f"Error menyimpan file ke local storage: {e}")
+            raise
+
 class GCPStorageProvider(CloudStorageProvider):
     def __init__(self):
         self.bucket_name = os.getenv('GCP_BUCKET_NAME')
@@ -52,7 +76,6 @@ class GCPStorageProvider(CloudStorageProvider):
 
 class S3CompatibleProvider(CloudStorageProvider):
     def __init__(self):
-
         self.endpoint_url = os.getenv('S3_ENDPOINT_URL')
         self.access_key = os.getenv('S3_ACCESS_KEY')
         self.secret_key = os.getenv('S3_SECRET_KEY')
@@ -87,32 +110,34 @@ class S3CompatibleProvider(CloudStorageProvider):
         return upload_to_s3(file_path, self.endpoint_url, self.access_key, self.secret_key, self.bucket_name, self.region)
 
 def get_storage_provider() -> CloudStorageProvider:
+    # Cek apakah LOCAL_STORAGE diset ke true
+    if os.getenv('USE_LOCAL_STORAGE', 'false').lower() == 'true':
+        logger.info("Menggunakan local storage provider")
+        return LocalStorageProvider()
     
     if os.getenv('S3_ENDPOINT_URL'):
-
         if ('digitalocean' in os.getenv('S3_ENDPOINT_URL').lower()):
-
             validate_env_vars('S3_DO')
         else:
             validate_env_vars('S3')
-
         return S3CompatibleProvider()
     
     if os.getenv('GCP_BUCKET_NAME'):
-
         validate_env_vars('GCP')
         return GCPStorageProvider()
     
-    raise ValueError(f"No cloud storage settings provided.")
+    # Default ke local storage jika tidak ada konfigurasi cloud
+    logger.info("Tidak ada konfigurasi cloud storage, menggunakan local storage")
+    return LocalStorageProvider()
 
 def upload_file(file_path: str) -> str:
     provider = get_storage_provider()
     try:
-        logger.info(f"Uploading file to cloud storage: {file_path}")
+        logger.info(f"Uploading file: {file_path}")
         url = provider.upload_file(file_path)
         logger.info(f"File uploaded successfully: {url}")
         return url
     except Exception as e:
-        logger.error(f"Error uploading file to cloud storage: {e}")
+        logger.error(f"Error uploading file: {e}")
         raise
     
